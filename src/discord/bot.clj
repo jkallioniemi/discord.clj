@@ -150,6 +150,7 @@
   "Given a name, prefix and series of :keyword-function pairs, builds a new bot inside of a
    with-open block that will sleep the while background threads manage the bot."
   [bot-name prefix & key-func-pairs]
+  (println "MODIFIED DISCORD.CLJ!")
   `(with-open [bot# (create-bot ~bot-name ~(build-inline-extensions key-func-pairs) ~prefix)]
      (while true (Thread/sleep 3000))))
 

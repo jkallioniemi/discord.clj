@@ -89,6 +89,8 @@
 (defonce message-code->name
   (map-invert message-name->code))
 
+(declare send-identify)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Handling server EVENTS
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -108,6 +110,21 @@
 
 ;;; Since there is nothing to do regarding a heartback ACK message, we'll just ignore it.
 (defmethod handle-gateway-control-event :heartbeat-ack [& _])
+
+(defmethod handle-gateway-control-event :invalidate-session
+  [_ gateway _]
+  (let [connection-state @(:connection-state gateway)]
+    (timbre/infof "Received invalidate-session, connection-state: %s" connection-state)
+    (when (= connection-state "reconnecting")
+      (do
+        (Thread/sleep 3500)
+        (send-identify gateway)))))
+
+(defmethod handle-gateway-control-event :resume
+  [_ gateway _]
+  (let [connection-state (:connection-state gateway)]
+    (timbre/infof "Received resume")
+    (reset! connection-state "online")))
 
 (defmethod handle-gateway-control-event :default
   [discord-event gateway receive-chan]
@@ -136,8 +153,11 @@
 
 (defmethod handle-gateway-message :READY
   [discord-message gateway receive-chan]
-  (let [session-id      (get-in discord-message [:d :session-id])
-        session-id-atom (:session-id gateway)]
+  (let [session-id       (get-in discord-message [:d :session-id])
+        session-id-atom  (:session-id gateway)
+        connection-state (:connection-state gateway)]
+    (timbre/infof "Received READY, connection-state set to online")
+    (reset! connection-state "online")
     (reset! session-id-atom session-id)))
 
 (defmethod handle-gateway-message :HELLO
@@ -208,7 +228,7 @@
     (send-message gateway heartbeat)))
 
 (defn send-resume [gateway]
-  (let [session-id  (:session-id gateway)
+  (let [session-id  @(:session-id gateway)
         seq-num     @(:seq-num gateway)]
     (send-message
       gateway
@@ -251,12 +271,12 @@
       gateway-url
       :on-receive (fn [message]
                     (handle-message message gateway receive-channel))
-      :on-connect (fn [message] (timbre/info "Connected to Discord Gateway"))
+      :on-connect (fn [message] (timbre/info "Connected to Discord Gateway."))
       :on-error   (fn [message] (timbre/errorf "Error: %s" message))
       :on-close   (fn [status reason]
                     ;; The codes above 1001 denote erroreous closure states
                     ;; https://developer.mozilla.org/en-US/docs/Web/API/CloseEvent
-                    (if (> 1001 status)
+                    (if (> status 1000)
                       (do
                         (timbre/warnf "Socket closed for unexpected reason (%d): %s" status reason)
                         (timbre/warnf "Attempting to reconnect to websocket...")
@@ -279,6 +299,7 @@
         heartbeat-interval     (atom 1000)
         stop-heartbeat-channel (async/chan)
         session-id             (atom nil)
+        connection-state       (atom "offline")
         gateway                (build-gateway (http/get-bot-gateway auth))
         gateway                (assoc gateway
                                       :auth                   auth
@@ -287,7 +308,8 @@
                                       :heartbeat-interval     heartbeat-interval
                                       :stop-heartbeat-channel stop-heartbeat-channel
                                       :receive-channel        receive-channel
-                                      :websocket              socket)
+                                      :websocket              socket
+                                      :connection-state       connection-state)
         websocket              (create-websocket gateway)]
 
     ;; Assign the connected websocket to the Gateway's socket field
@@ -309,7 +331,10 @@
    our current socket reference and then send a 'resume' message to the Discord gateway that we have
    resumed our session."
   [gateway]
-  (let [socket        (:websocket gateway)
-        websocket     (create-websocket gateway)]
+  (let [socket           (:websocket gateway)
+        websocket        (create-websocket gateway)
+        connection-state (:connection-state gateway)]
     (reset! socket websocket)
+    (timbre/infof "Reconnecting gateway, connection-state set to reconnecting.")
+    (reset! connection-state "reconnecting")
     (send-resume gateway)))
